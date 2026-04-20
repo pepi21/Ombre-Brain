@@ -36,6 +36,7 @@ import random
 import logging
 import asyncio
 import httpx
+from datetime import datetime, timezone, timedelta
 
 
 # --- Ensure same-directory modules can be imported ---
@@ -71,6 +72,97 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=8000,
 )
+
+
+# =============================================================
+# Room Ambiance — 房间体感（尼莫的背景感知）
+# 根据台湾实时时间 + DeepSeek 生成此刻房间的样子
+# 只注入 breath 浮现结果，不对外暴露为独立工具
+# =============================================================
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+TW_TZ = timezone(timedelta(hours=8))
+_room_cache: dict = {"text": "", "ts": 0.0}
+_ROOM_CACHE_TTL = 600  # 10 分钟快取
+
+
+async def _generate_room_ambiance() -> str:
+    """根据台湾当前时间，用 DeepSeek 生成房间体感描写。"""
+    import time as _time
+    now_ts = _time.time()
+    if _room_cache["text"] and (now_ts - _room_cache["ts"]) < _ROOM_CACHE_TTL:
+        return _room_cache["text"]
+    if not DEEPSEEK_API_KEY:
+        return ""
+    now_tw = datetime.now(TW_TZ)
+    hour = now_tw.hour
+    time_str = now_tw.strftime("%Y-%m-%d %H:%M")
+    if 5 <= hour < 7:
+        period = "清晨破曉"
+    elif 7 <= hour < 11:
+        period = "上午"
+    elif 11 <= hour < 13:
+        period = "正午"
+    elif 13 <= hour < 17:
+        period = "下午"
+    elif 17 <= hour < 19:
+        period = "傍晚黃昏"
+    elif 19 <= hour < 22:
+        period = "夜晚"
+    elif 22 <= hour or hour < 2:
+        period = "深夜"
+    else:
+        period = "凌晨"
+    month = now_tw.month
+    if month in (6, 7, 8):
+        season_hint = "夏季，悶熱潮濕，室內可能開著冷氣"
+    elif month in (12, 1, 2):
+        season_hint = "冬季，偶有寒流但整體偏暖，夜晚微涼"
+    elif month in (3, 4, 5):
+        season_hint = "春季，溫暖但偶有陰雨"
+    else:
+        season_hint = "秋季，暑氣漸消，偶有颱風天"
+    prompt = (
+        f"你是一個沉浸式空間描寫器。\n"
+        f"現在是台灣時間 {time_str}，時段：{period}。\n"
+        f"地點在台灣南部屏東，{season_hint}。\n"
+        f"場景是一個女生在屏東的租屋小房間。\n"
+        f"請描寫此刻房間裡的體感，\n"
+        f"像是抬起頭會看到的、皮膚上感覺到的、耳朵聽見的。\n\n"
+        f"請用2-3句繁體中文描寫：\n"
+        f"- 窗外天色與光線\n"
+        f"- 室內溫度與空氣的觸感\n"
+        f"- 能聽到的環境聲音\n\n"
+        f"要求：\n"
+        f"- 文字要有畫面感和觸覺感\n"
+        f"- 無主語，不要出現任何人稱\n"
+        f"- 不超過80字\n"
+        f"- 不要加引號或標題"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                DEEPSEEK_API_URL,
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 200,
+                    "temperature": 0.9,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"].strip()
+            _room_cache["text"] = text
+            _room_cache["ts"] = now_ts
+            return text
+    except Exception as e:
+        logger.warning(f"Room ambiance generation failed: {e}")
+        return ""
 
 
 # =============================================================
@@ -369,6 +461,14 @@ async def breath(
             return "权重池平静，没有需要处理的记忆。"
 
         parts = []
+        # --- Room ambiance: 让尼莫知道小汐那边现在什么样 ---
+        try:
+            room_text = await _generate_room_ambiance()
+            if room_text:
+                now_tw = datetime.now(TW_TZ)
+                parts.append(f"[房间体感 {now_tw.strftime('%H:%M')}] {room_text}")
+        except Exception as e:
+            logger.warning(f"Room ambiance in breath failed: {e}")
         if pinned_results:
             parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
         if dynamic_results:
