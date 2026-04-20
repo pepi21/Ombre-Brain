@@ -457,9 +457,6 @@ async def breath(
                 logger.warning(f"Failed to dehydrate surfaced bucket / 浮现脱水失败: {e}")
                 continue
 
-        if not pinned_results and not dynamic_results:
-            return "权重池平静，没有需要处理的记忆。"
-
         parts = []
         # --- Room ambiance: 让尼莫知道小汐那边现在什么样 ---
         try:
@@ -469,6 +466,10 @@ async def breath(
                 parts.append(f"[房间体感 {now_tw.strftime('%H:%M')}] {room_text}")
         except Exception as e:
             logger.warning(f"Room ambiance in breath failed: {e}")
+
+        if not pinned_results and not dynamic_results and not parts:
+            return "权重池平静，没有需要处理的记忆。"
+
         if pinned_results:
             parts.append("=== 核心准则 ===\n" + "\n---\n".join(pinned_results))
         if dynamic_results:
