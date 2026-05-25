@@ -46,10 +46,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import FastMCP
 
 from bucket_manager import BucketManager
-from dehydrator import Dehydrator
+from dehydrator import Dehydrator, PEOPLE_CANONICAL_LIST
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
+from raw_memory_store import RawMemoryStore
 from utils import load_config, setup_logging, strip_wikilinks, count_tokens_approx
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
@@ -63,6 +64,15 @@ dehydrator = Dehydrator(config)                      # Dehydrator / 脱水器
 decay_engine = DecayEngine(config, bucket_mgr)       # Decay engine / 衰减引擎
 embedding_engine = EmbeddingEngine(config)            # Embedding engine / 向量化引擎
 import_engine = ImportEngine(config, bucket_mgr, dehydrator, embedding_engine)  # Import engine / 导入引擎
+raw_store = RawMemoryStore(config)                    # Raw memory store / 原话保留层
+
+# --- People canonical list (for merge subject conflict detection) ---
+# --- 人物正规名列表（用于合并时主语冲突检测）---
+people_list = config.get("people_canonical_list", PEOPLE_CANONICAL_LIST)
+
+# --- Merge-protected domains ---
+# --- 不可合并的主题域 ---
+MERGE_PROTECTED_DOMAINS = {"核心准则", "人設", "身份", "核心准则", "人设"}
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
 # host="0.0.0.0" so Docker container's SSE is externally reachable
@@ -290,47 +300,110 @@ async def _merge_or_create(
     valence: float,
     arousal: float,
     name: str = "",
+    actor: str = "",
+    target: str = "",
+    action: str = "",
 ) -> tuple[str, bool]:
     """
     Check if a similar bucket exists for merging; merge if so, create if not.
     Returns (bucket_id_or_name, is_merged).
     检查是否有相似桶可合并，有则合并，无则新建。
     返回 (桶ID或名称, 是否合并)。
-    """
-    try:
-        existing = await bucket_mgr.search(content, limit=1, domain_filter=domain or None)
-    except Exception as e:
-        logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
-        existing = []
 
-    if existing and existing[0].get("score", 0) > config.get("merge_threshold", 75):
-        bucket = existing[0]
-        # --- Never merge into pinned/protected buckets ---
-        # --- 不合并到钉选/保护桶 ---
-        if not (bucket["metadata"].get("pinned") or bucket["metadata"].get("protected")):
-            try:
-                merged = await dehydrator.merge(bucket["content"], content)
-                old_v = bucket["metadata"].get("valence", 0.5)
-                old_a = bucket["metadata"].get("arousal", 0.3)
-                merged_valence = round((old_v + valence) / 2, 2)
-                merged_arousal = round((old_a + arousal) / 2, 2)
-                await bucket_mgr.update(
-                    bucket["id"],
-                    content=merged,
-                    tags=list(set(bucket["metadata"].get("tags", []) + tags)),
-                    importance=max(bucket["metadata"].get("importance", 5), importance),
-                    domain=list(set(bucket["metadata"].get("domain", []) + domain)),
-                    valence=merged_valence,
-                    arousal=merged_arousal,
-                )
-                # --- Update embedding after merge ---
-                try:
-                    await embedding_engine.generate_and_store(bucket["id"], merged)
-                except Exception:
-                    pass
-                return bucket["metadata"].get("name", bucket["id"]), True
-            except Exception as e:
-                logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
+    Merge is BLOCKED when:
+    合并被阻止的条件:
+      - importance >= 8
+      - domain is in protected set (核心准则/人設/身份)
+      - actor/target conflict with target bucket
+    """
+    # --- Rule: high importance memories never merge ---
+    # --- 规则：高重要度记忆永不合并 ---
+    skip_merge = False
+    if importance >= 8:
+        skip_merge = True
+        logger.info(f"Merge skipped: importance={importance} >= 8")
+
+    # --- Rule: protected domains never merge ---
+    # --- 规则：核心域记忆永不合并 ---
+    if not skip_merge and domain:
+        if set(domain) & MERGE_PROTECTED_DOMAINS:
+            skip_merge = True
+            logger.info(f"Merge skipped: domain {domain} is protected")
+
+    if not skip_merge:
+        try:
+            existing = await bucket_mgr.search(content, limit=1, domain_filter=domain or None)
+        except Exception as e:
+            logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
+            existing = []
+
+        if existing and existing[0].get("score", 0) > config.get("merge_threshold", 75):
+            bucket = existing[0]
+            # --- Never merge into pinned/protected buckets ---
+            # --- 不合并到钉选/保护桶 ---
+            if bucket["metadata"].get("pinned") or bucket["metadata"].get("protected"):
+                pass  # Fall through to create
+            # --- Never merge into high-importance buckets ---
+            elif bucket["metadata"].get("importance", 5) >= 8:
+                logger.info(f"Merge skipped: target bucket importance >= 8")
+            # --- Never merge into feel buckets ---
+            elif bucket["metadata"].get("type") == "feel":
+                logger.info(f"Merge skipped: target is feel bucket")
+            else:
+                # --- Subject conflict detection ---
+                # --- 主语冲突检测 ---
+                merge_allowed = True
+                bucket_actor = bucket["metadata"].get("actor", "")
+                bucket_target_person = bucket["metadata"].get("target", "")
+
+                if actor and bucket_actor:
+                    # Both have actors — they must be compatible
+                    if actor != bucket_actor:
+                        merge_allowed = False
+                        logger.info(
+                            f"Merge blocked: actor conflict "
+                            f"new='{actor}' vs bucket='{bucket_actor}'"
+                        )
+                if target and bucket_target_person:
+                    if target != bucket_target_person:
+                        merge_allowed = False
+                        logger.info(
+                            f"Merge blocked: target conflict "
+                            f"new='{target}' vs bucket='{bucket_target_person}'"
+                        )
+
+                if merge_allowed:
+                    try:
+                        merged = await dehydrator.merge(bucket["content"], content)
+                        old_v = bucket["metadata"].get("valence", 0.5)
+                        old_a = bucket["metadata"].get("arousal", 0.3)
+                        merged_valence = round((old_v + valence) / 2, 2)
+                        merged_arousal = round((old_a + arousal) / 2, 2)
+                        update_kwargs = dict(
+                            content=merged,
+                            tags=list(set(bucket["metadata"].get("tags", []) + tags)),
+                            importance=max(bucket["metadata"].get("importance", 5), importance),
+                            domain=list(set(bucket["metadata"].get("domain", []) + domain)),
+                            valence=merged_valence,
+                            arousal=merged_arousal,
+                        )
+                        # Preserve actor/target from existing bucket (never overwrite with new)
+                        if actor and not bucket_actor:
+                            update_kwargs["actor"] = actor
+                        if target and not bucket_target_person:
+                            update_kwargs["target"] = target
+                        if action and not bucket["metadata"].get("action", ""):
+                            update_kwargs["action"] = action
+
+                        await bucket_mgr.update(bucket["id"], **update_kwargs)
+                        # --- Update embedding after merge ---
+                        try:
+                            await embedding_engine.generate_and_store(bucket["id"], merged)
+                        except Exception:
+                            pass
+                        return bucket["metadata"].get("name", bucket["id"]), True
+                    except Exception as e:
+                        logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
 
     bucket_id = await bucket_mgr.create(
         content=content,
@@ -340,6 +413,9 @@ async def _merge_or_create(
         valence=valence,
         arousal=arousal,
         name=name or None,
+        actor=actor,
+        target=target,
+        action=action,
     )
     # --- Generate embedding for new bucket ---
     try:
@@ -503,6 +579,29 @@ async def breath(
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
 
+    # ==========================================================
+    # Priority 1: Raw layer search (original verbatim content)
+    # 第一优先：原话层搜索（原始逐字内容）
+    # ==========================================================
+    raw_results_text = []
+    raw_token_used = 0
+    try:
+        raw_hits = raw_store.search(query, limit=5)
+        for rh in raw_hits:
+            actor_info = f" [{rh['actor']}→{rh['target']}]" if rh.get("actor") else ""
+            entry = f"[原话]{actor_info} {rh['content']}"
+            entry_tokens = count_tokens_approx(entry)
+            if raw_token_used + entry_tokens > max_tokens // 2:
+                break  # Reserve at least half budget for summary layer
+            raw_results_text.append(entry)
+            raw_token_used += entry_tokens
+    except Exception as e:
+        logger.warning(f"Raw layer search failed: {e}")
+
+    # ==========================================================
+    # Priority 2: Summary layer (existing bucket search)
+    # 第二优先：摘要层（现有桶检索）
+    # ==========================================================
     try:
         matches = await bucket_mgr.search(
             query,
@@ -536,7 +635,7 @@ async def breath(
         logger.warning(f"Vector search failed, using keyword only / 向量搜索失败: {e}")
 
     results = []
-    token_used = 0
+    token_used = raw_token_used  # Account for tokens already used by raw results
     for bucket in matches:
         if token_used >= max_tokens:
             break
@@ -585,15 +684,22 @@ async def breath(
         except Exception as e:
             logger.warning(f"Random surfacing failed / 随机浮现失败: {e}")
 
-    if not results:
+    if not results and not raw_results_text:
         return "未找到相关记忆。"
 
-    return "\n---\n".join(results)
+    # --- Combine: raw first, then summary ---
+    # --- 组合返回：原话优先，然后摘要 ---
+    final_parts = []
+    if raw_results_text:
+        final_parts.append("=== 原话 ===\n" + "\n---\n".join(raw_results_text))
+    if results:
+        final_parts.append("=== 记忆摘��� ===\n" + "\n---\n".join(results))
+    return "\n\n".join(final_parts)
 
 
 # =============================================================
 # Tool 2: hold — Hold on to this
-# 工具 2：hold — 握住，留下来
+# 工具 2：hold — ���住，留下来
 # =============================================================
 @mcp.tool()
 async def hold(
@@ -602,10 +708,14 @@ async def hold(
     importance: int = 5,
     pinned: bool = False,
     feel: bool = False,
-    source_bucket: str = "",    valence: float = -1,
+    source_bucket: str = "",
+    valence: float = -1,
     arousal: float = -1,
+    actor: str = "",
+    target: str = "",
+    action: str = "",
 ) -> str:
-    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。"""
+    """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。actor=动作发出者,target=动作接收者,action=核心动作(可选,未填会自动推断)。"""
     await decay_engine.ensure_started()
 
     # --- Input validation / 输入校验 ---
@@ -614,6 +724,25 @@ async def hold(
 
     importance = max(1, min(10, importance))
     extra_tags = [t.strip() for t in tags.split(",") if t.strip()]
+
+    # ==========================================================
+    # Step 0: Store raw content FIRST (append-only, never lost)
+    # 第零步：先把原文完整写入 raw 层（只追加，永不丢失）
+    # ==========================================================
+    raw_source = "model_feel" if feel else "user"
+    raw_valence = valence if 0 <= valence <= 1 else 0.5
+    raw_arousal = arousal if 0 <= arousal <= 1 else 0.3
+    raw_id = raw_store.store(
+        content=content,
+        source=raw_source,
+        importance=importance,
+        tags=extra_tags,
+        valence=raw_valence,
+        arousal=raw_arousal,
+        actor=actor,
+        target=target,
+        action=action,
+    )
 
     # --- Feel mode: store as feel type, minimal metadata ---
     # --- Feel 模式：存为 feel 类型，最少元数据 ---
@@ -635,6 +764,8 @@ async def hold(
             await embedding_engine.generate_and_store(bucket_id, content)
         except Exception:
             pass
+        # Link raw to bucket
+        raw_store.link_bucket(raw_id, bucket_id)
         # --- Mark source memory as digested + store model's valence perspective ---
         # --- 标记源记忆为已消化 + 存储模型视角的 valence ---
         if source_bucket and source_bucket.strip():
@@ -655,6 +786,7 @@ async def hold(
         analysis = {
             "domain": ["未分类"], "valence": 0.5, "arousal": 0.3,
             "tags": [], "suggested_name": "",
+            "actor": "", "target": "", "action": "",
         }
 
     domain = analysis["domain"]
@@ -662,6 +794,12 @@ async def hold(
     arousal = analysis["arousal"]
     auto_tags = analysis["tags"]
     suggested_name = analysis.get("suggested_name", "")
+
+    # --- Use explicit actor/target/action if provided; fall back to analysis ---
+    # --- 优先使用显式传入的主语锚点，未传则用 analyze 推断的 ---
+    final_actor = actor or analysis.get("actor", "")
+    final_target = target or analysis.get("target", "")
+    final_action = action or analysis.get("action", "")
 
     all_tags = list(dict.fromkeys(auto_tags + extra_tags))
 
@@ -678,11 +816,16 @@ async def hold(
             name=suggested_name or None,
             bucket_type="permanent",
             pinned=True,
+            actor=final_actor,
+            target=final_target,
+            action=final_action,
         )
         try:
             await embedding_engine.generate_and_store(bucket_id, content)
         except Exception:
             pass
+        # Link raw to bucket
+        raw_store.link_bucket(raw_id, bucket_id)
         return f"📌钉选→{bucket_id} {','.join(domain)}"
 
     # --- Step 2: merge or create / 合并或新建 ---
@@ -694,10 +837,17 @@ async def hold(
         valence=valence,
         arousal=arousal,
         name=suggested_name,
+        actor=final_actor,
+        target=final_target,
+        action=final_action,
     )
 
-    action = "合并→" if is_merged else "新建→"
-    return f"{action}{result_name} {','.join(domain)}"
+    # Link raw to the resulting bucket
+    # result_name could be bucket_id (new) or name (merged) — link by raw_id
+    raw_store.link_bucket(raw_id, result_name)
+
+    hold_action = "合并→" if is_merged else "新建→"
+    return f"{hold_action}{result_name} {','.join(domain)}"
 
 
 # =============================================================
@@ -711,6 +861,14 @@ async def grow(content: str) -> str:
 
     if not content or not content.strip():
         return "内容为空，无法整理。"
+
+    # --- Store raw content first (full diary dump) ---
+    # --- 先保存原始日记全文到 raw 层 ---
+    raw_store.store(
+        content=content,
+        source="grow",
+        importance=5,
+    )
 
     # --- Short content fast path: skip digest, use hold logic directly ---
     # --- 短内容快速路径：跳过 digest 拆分，直接走 hold 逻辑省一次 API ---
@@ -1069,6 +1227,36 @@ async def dream() -> str:
             logger.warning(f"Dream crystallization hint failed: {e}")
 
     return header + "\n---\n".join(parts) + connection_hint + crystal_hint
+
+
+# =============================================================
+# Tool 7: recall — Direct raw memory search
+# 工具 7：recall — 直接搜索原话层
+#
+# Bypasses dehydration/summary layer, returns original verbatim content.
+# 绕过脱水/摘要层，返回原始逐字内容。
+# =============================================================
+@mcp.tool()
+async def recall(query: str, limit: int = 5) -> str:
+    """直接搜索原话层,返回原始完整对话片段。不经过脱水压缩,看到的就是当时说的原话。limit控制返回数量(默认5,最大20)。"""
+    if not query or not query.strip():
+        return "请提供搜索关键词。"
+
+    limit = max(1, min(20, limit))
+    results = raw_store.search(query, limit=limit)
+
+    if not results:
+        return "原话层未找到相关记录。"
+
+    parts = []
+    for r in results:
+        actor_info = f" [{r['actor']}→{r['target']}]" if r.get("actor") else ""
+        parts.append(
+            f"[原话 #{r['id']}] [{r['timestamp']}]{actor_info}\n"
+            f"{r['content']}"
+        )
+
+    return "=== 原话记录 ===\n" + "\n---\n".join(parts)
 
 
 # =============================================================

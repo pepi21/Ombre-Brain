@@ -72,16 +72,17 @@
 
 ### 技术能力
 
-**6 个 MCP 工具**
+**7 个 MCP 工具**
 
 | 工具 | 关键参数 | 功能 |
 |---|---|---|
-| `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆 |
-| `hold` | content, tags, importance, pinned, feel, source_bucket, valence, arousal | 存储记忆 |
-| `grow` | content | 日记拆分归档 |
+| `breath` | query, max_tokens, domain, valence, arousal, max_results | 检索/浮现记忆（搜索模式下原话优先） |
+| `hold` | content, tags, importance, pinned, feel, source_bucket, valence, arousal, **actor, target, action** | 存储记忆（先存 raw 层，再走合并/新建） |
+| `grow` | content | 日记拆分归档（先存 raw 层） |
 | `trace` | bucket_id, name, domain, valence, arousal, importance, tags, resolved, pinned, digested, content, delete | 修改元数据/内容/删除 |
 | `pulse` | include_archive | 系统状态 |
 | `dream` | （无） | 做梦自省 |
+| `recall` | query, limit | **直接搜索原话层，返回原始完整内容** |
 
 **工具详细行为**
 
@@ -196,7 +197,8 @@
 
 | 文件 | 职责 | 依赖（项目内） | 被谁调用 |
 |---|---|---|---|
-| `server.py` | MCP 服务器主入口，注册工具 + Dashboard API + 钩子端点 | `bucket_manager`, `dehydrator`, `decay_engine`, `embedding_engine`, `utils` | `test_tools.py` |
+| `server.py` | MCP 服务器主入口，注册 7 个工具 + Dashboard API + 钩子端点 | `bucket_manager`, `dehydrator`, `decay_engine`, `embedding_engine`, `raw_memory_store`, `utils` | `test_tools.py` |
+| `raw_memory_store.py` | 原话保留层 — append-only SQLite，FTS5 全文搜索 | `utils` | `server.py`, `migrate_raw_backfill.py` |
 | `bucket_manager.py` | 记忆桶 CRUD、多维索引搜索、wikilink 注入、激活更新 | `utils` | `server.py`, `check_buckets.py`, `backfill_embeddings.py` |
 | `decay_engine.py` | 衰减引擎：遗忘曲线计算、自动归档、自动结案 | 无（接收 `bucket_mgr` 实例） | `server.py` |
 | `dehydrator.py` | 数据脱水压缩 + 合并 + 自动打标（LLM API + 本地降级） | `utils` | `server.py` |

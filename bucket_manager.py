@@ -110,6 +110,9 @@ class BucketManager:
         name: str = None,
         pinned: bool = False,
         protected: bool = False,
+        actor: str = "",
+        target: str = "",
+        action: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -148,6 +151,13 @@ class BucketManager:
             metadata["pinned"] = True
         if protected:
             metadata["protected"] = True
+        # --- Subject anchor fields / 主语锚点 ---
+        if actor:
+            metadata["actor"] = actor
+        if target:
+            metadata["target"] = target
+        if action:
+            metadata["action"] = action
 
         # --- Assemble Markdown file (frontmatter + body) ---
         # --- 组装 Markdown 文件 ---
@@ -278,6 +288,13 @@ class BucketManager:
             post["digested"] = bool(kwargs["digested"])
         if "model_valence" in kwargs:
             post["model_valence"] = max(0.0, min(1.0, float(kwargs["model_valence"])))
+        # --- Subject anchor fields / 主语锚点 ---
+        if "actor" in kwargs:
+            post["actor"] = str(kwargs["actor"])
+        if "target" in kwargs:
+            post["target"] = str(kwargs["target"])
+        if "action" in kwargs:
+            post["action"] = str(kwargs["action"])
 
         # --- Auto-refresh activation time / 自动刷新激活时间 ---
         post["last_active"] = now_iso()
