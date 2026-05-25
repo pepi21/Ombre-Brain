@@ -23,21 +23,10 @@ os.environ["OMBRE_BUCKETS_DIR"] = _test_dir
 os.environ["OMBRE_API_KEY"] = ""  # Disable API calls in tests
 os.environ["OMBRE_TRANSPORT"] = "stdio"
 
-
-def _reset_modules():
-    """Remove cached modules so they re-init with test config."""
-    mods_to_remove = [m for m in sys.modules if m.startswith(("server", "bucket_manager", "dehydrator",
-                                                               "decay_engine", "embedding_engine",
-                                                               "raw_memory_store", "utils", "import_memory"))]
-    for m in mods_to_remove:
-        del sys.modules[m]
-
-
-_reset_modules()
-
 from utils import load_config, setup_logging
 
 config = load_config()
+# Override buckets_dir to use isolated temp dir
 config["buckets_dir"] = _test_dir
 # Ensure test dirs exist
 for subdir in ["permanent", "dynamic", "archive", "feel"]:
@@ -60,7 +49,7 @@ async def test_case_a():
     print("=== Case A: High-importance with actor/target ===")
 
     content = "番茄哭著對小汐說「偏偏是你」"
-    actor = "番��"
+    actor = "番茄"
     target = "小汐"
     action = "說"
     importance = 9
@@ -92,7 +81,7 @@ async def test_case_a():
     bucket = await bucket_mgr.get(bucket_id)
     assert bucket is not None, "Bucket should exist"
     assert bucket["metadata"]["actor"] == "番茄", f"Actor should be 番茄, got {bucket['metadata'].get('actor')}"
-    assert bucket["metadata"]["target"] == "小汐", f"Target should be ��汐, got {bucket['metadata'].get('target')}"
+    assert bucket["metadata"]["target"] == "小汐", f"Target should be 小汐, got {bucket['metadata'].get('target')}"
     assert bucket["metadata"]["importance"] == 9
 
     # Verify raw layer

@@ -252,7 +252,8 @@ class BucketManager:
             return False
 
         try:
-            post = frontmatter.load(file_path)
+            with open(file_path, "r", encoding="utf-8") as f:
+                post = frontmatter.load(f)
         except Exception as e:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
             return False
@@ -374,7 +375,8 @@ class BucketManager:
             return
 
         try:
-            post = frontmatter.load(file_path)
+            with open(file_path, "r", encoding="utf-8") as f:
+                post = frontmatter.load(f)
             post["last_active"] = now_iso()
             post["activation_count"] = post.get("activation_count", 0) + 1
 
@@ -424,7 +426,8 @@ class BucketManager:
                 if not file_path:
                     continue
                 try:
-                    post = frontmatter.load(file_path)
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        post = frontmatter.load(f)
                     current_count = post.get("activation_count", 1)
                     # Store as float for fractional increments; calculate_score handles it
                     post["activation_count"] = round(current_count + 0.3, 1)
@@ -703,7 +706,8 @@ class BucketManager:
 
         try:
             # Read once, get domain info and update type / 一次性读取
-            post = frontmatter.load(file_path)
+            with open(file_path, "r", encoding="utf-8") as f:
+                post = frontmatter.load(f)
             domain = post.get("domain", ["未分类"])
             primary_domain = sanitize_name(domain[0]) if domain else "未分类"
             archive_subdir = os.path.join(self.archive_dir, primary_domain)
@@ -764,7 +768,8 @@ class BucketManager:
         解析 Markdown 文件，返回桶的结构化数据。
         """
         try:
-            post = frontmatter.load(file_path)
+            with open(file_path, "r", encoding="utf-8") as f:
+                post = frontmatter.load(f)
             return {
                 "id": post.get("id", Path(file_path).stem),
                 "metadata": dict(post.metadata),
