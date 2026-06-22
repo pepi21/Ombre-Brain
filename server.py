@@ -1383,6 +1383,46 @@ async def api_network(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/breath", methods=["GET"])
+async def api_breath(request):
+    """Return top active buckets for the dashboard."""
+    from starlette.responses import JSONResponse
+    try:
+        try:
+            limit = int(request.query_params.get("n", "10"))
+        except ValueError:
+            limit = 10
+        limit = max(1, min(50, limit))
+
+        all_buckets = await bucket_mgr.list_all(include_archive=False)
+        results = []
+        for bucket in all_buckets:
+            meta = bucket.get("metadata", {})
+            if meta.get("resolved", False) or meta.get("digested", False):
+                continue
+            score = decay_engine.calculate_score(meta)
+            results.append({
+                "id": bucket["id"],
+                "name": meta.get("name", bucket["id"]),
+                "type": meta.get("type", "dynamic"),
+                "domain": meta.get("domain", []),
+                "valence": meta.get("valence", 0.5),
+                "arousal": meta.get("arousal", 0.3),
+                "importance": meta.get("importance", 5),
+                "pinned": meta.get("pinned", False),
+                "score": score,
+                "content_preview": strip_wikilinks(bucket.get("content", ""))[:200],
+            })
+        results.sort(key=lambda item: item["score"], reverse=True)
+        return JSONResponse({
+            "buckets": results[:limit],
+            "results": results[:limit],
+            "total": len(results),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.custom_route("/api/breath-debug", methods=["GET"])
 async def api_breath_debug(request):
     """Debug endpoint: simulate breath scoring and return per-bucket breakdown."""
@@ -1472,6 +1512,40 @@ async def dashboard(request):
             return HTMLResponse(f.read())
     except FileNotFoundError:
         return HTMLResponse("<h1>dashboard.html not found</h1>", status_code=404)
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def root_dashboard(request):
+    """Serve the dashboard at the root URL too."""
+    return await dashboard(request)
+
+
+@mcp.custom_route("/static/{name}", methods=["GET"])
+async def static_asset(request):
+    """Serve the few frontend assets the dashboard references."""
+    from starlette.responses import JSONResponse, Response
+    import os
+    name = request.path_params["name"]
+    allowed = {
+        "icon.svg": "image/svg+xml",
+        "favicon.svg": "image/svg+xml",
+        "manifest.json": "application/manifest+json",
+        "RRPL.ttf": "font/truetype",
+    }
+    if name not in allowed:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    path = os.path.join(os.path.dirname(__file__), "frontend", name)
+    try:
+        with open(path, "rb") as f:
+            return Response(f.read(), media_type=allowed[name])
+    except FileNotFoundError:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+
+@mcp.custom_route("/favicon.ico", methods=["GET"])
+async def favicon_redirect(request):
+    from starlette.responses import RedirectResponse
+    return RedirectResponse(url="/static/favicon.svg", status_code=301)
 
 
 @mcp.custom_route("/api/config", methods=["GET"])
