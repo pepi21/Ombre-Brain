@@ -321,6 +321,40 @@
     overflow-y: auto;
     box-shadow: inset 3px 3px 6px var(--shadow-dark-subtle), inset -3px -3px 6px var(--shadow-light);
   }
+  .detail-editor {
+    width: 100%;
+    min-height: 220px;
+    resize: vertical;
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    font: inherit;
+    line-height: 1.7;
+    box-sizing: border-box;
+  }
+  .detail-actions {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    margin-top: 12px;
+  }
+  .detail-actions button {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 14px;
+    cursor: pointer;
+    background: var(--surface);
+    color: var(--text);
+  }
+  .detail-actions .danger { color: var(--negative); }
+  .detail-status {
+    min-height: 18px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
 
   .config-section {
     margin-bottom: 28px;
@@ -936,7 +970,7 @@ async function showDetail(id) {
   panel.classList.add('open');
 
   try {
-    var res = await fetch(BASE + '/api/bucket/' + id);
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id));
     var b = await res.json();
     var meta = b.metadata || {};
     content.innerHTML =
@@ -958,9 +992,50 @@ async function showDetail(id) {
         '<div class="field"><label>创建</label>' + (meta.created || '—') + '</div>' +
         '<div class="field"><label>最后活跃</label>' + (meta.last_active || '—') + '</div>' +
       '</div>' +
-      '<div class="detail-content">' + esc(b.content) + '</div>';
+      '<textarea class="detail-editor" id="bucket-editor">' + esc(b.content) + '</textarea>' +
+      '<div class="detail-actions">' +
+        '<button onclick="saveBucketContent(\'' + id + '\')">儲存</button>' +
+        '<button class="danger" onclick="deleteBucket(\'' + id + '\')">刪除</button>' +
+      '</div>' +
+      '<div class="detail-status" id="detail-status"></div>';
   } catch (e) {
     content.innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+  }
+}
+
+async function saveBucketContent(id) {
+  var editor = document.getElementById('bucket-editor');
+  var status = document.getElementById('detail-status');
+  status.textContent = 'Saving...';
+  try {
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({content: editor.value})
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'save failed');
+    status.textContent = 'Saved';
+    await loadBuckets();
+  } catch (e) {
+    status.textContent = 'Save failed: ' + e.message;
+  }
+}
+
+async function deleteBucket(id) {
+  if (!confirm('刪掉這條記憶？')) return;
+  var status = document.getElementById('detail-status');
+  status.textContent = 'Deleting...';
+  try {
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id), {method: 'DELETE'});
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'delete failed');
+    allBuckets = allBuckets.filter(function(b) { return b.id !== id; });
+    renderBuckets(filterBuckets(allBuckets));
+    updateStats();
+    closeDetail();
+  } catch (e) {
+    status.textContent = 'Delete failed: ' + e.message;
   }
 }
 

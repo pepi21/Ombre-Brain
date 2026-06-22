@@ -1314,6 +1314,45 @@ async def api_bucket_detail(request):
     })
 
 
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["PATCH"])
+async def api_bucket_update(request):
+    """Update bucket content from the dashboard."""
+    from starlette.responses import JSONResponse
+    bucket_id = request.path_params["bucket_id"]
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return JSONResponse({"error": "content is required"}, status_code=400)
+    if not await bucket_mgr.get(bucket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    if not await bucket_mgr.update(bucket_id, content=content):
+        return JSONResponse({"error": "update failed"}, status_code=500)
+    try:
+        await embedding_engine.generate_and_store(bucket_id, content)
+    except Exception as e:
+        logger.warning(f"Failed to refresh embedding for {bucket_id}: {e}")
+    return JSONResponse({"ok": True, "id": bucket_id})
+
+
+@mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
+async def api_bucket_delete(request):
+    """Delete a bucket from the dashboard."""
+    from starlette.responses import JSONResponse
+    bucket_id = request.path_params["bucket_id"]
+    if not await bucket_mgr.delete(bucket_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        embedding_engine.delete_embedding(bucket_id)
+    except Exception as e:
+        logger.warning(f"Failed to delete embedding for {bucket_id}: {e}")
+    return JSONResponse({"ok": True, "id": bucket_id})
+
+
 @mcp.custom_route("/api/search", methods=["GET"])
 async def api_search(request):
     """Search buckets by query."""
